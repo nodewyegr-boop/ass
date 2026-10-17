@@ -43,6 +43,7 @@ class Economy(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.bot.add_view(TopUpMainView())
+        
     @commands.hybrid_command(name="true")
     async def true(self, ctx):
         if ctx.author.id != OWNER_ID: return await ctx.send("ชั้นต่ำอยากจะใช้คำสั่งชั้นสูงรั่วว", ephemeral=True)
@@ -52,12 +53,15 @@ class Economy(commands.Cog):
             f"กดเติมเงินด้านล่าง รับเเค่ <:1000035915:1559174417097953340> เเล้วรอระบบตรวจสอบลิ้ง ถ้าตรวจสอบเสร็จเดียวบอทจะเเจ้งไปในDm"
         )
         await ctx.send(embed=embed, view=TopUpMainView())
-    @commands.hybrid_command(name="m")
+
+    # บังคับใช้ ! นำหน้าเท่านั้น ห้ามใช้ /
+    @commands.command(name="m")
     async def m(self, ctx, member: discord.Member, amount: int):
         if ctx.author.id != OWNER_ID: return
         await db.update_balance(member.id, amount)
         await ctx.send(f"ให้เงิน {member.mention} จำนวน {amount} บาทแล้ว")
-    @commands.hybrid_command(name="um")
+
+    @commands.command(name="um")
     async def um(self, ctx, member: discord.Member, amount: int):
         if ctx.author.id != OWNER_ID: return
         await db.update_balance(member.id, -amount)
