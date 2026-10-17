@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands
-import os, random, string, aiohttp, db, aiosqlite, time
+import os, random, string, aiohttp, db, aiosqlite, time, traceback
+from urllib.parse import quote
 from dotenv import load_dotenv
 load_dotenv()
 OWNER_ID = int(os.getenv("OWNER_ID"))
@@ -14,24 +15,42 @@ class OAuth2Server:
         runner = web.AppRunner(app)
         await runner.setup()
         await web.TCPSite(runner, '0.0.0.0', 8080).start()
+        print("[+] OAuth2 Server started on port 8080")
+
     async def handle_callback(self, request):
         from aiohttp import web
         code = request.query.get('code')
-        if not code: return web.Response(text="No code", status=400)
-        data = {'client_id': os.getenv('CLIENT_ID'), 'client_secret': os.getenv('CLIENT_SECRET'), 'grant_type': 'authorization_code', 'code': code, 'redirect_uri': os.getenv('REDIRECT_URI')}
-        async with aiohttp.ClientSession() as session:
-            async with session.post("https://discord.com/api/v10/oauth2/token", data=data) as resp:
-                if resp.status != 200: return web.Response(text="Fail", status=400)
-                t = await resp.json()
-                async with session.get("https://discord.com/api/v10/users/@me", headers={'Authorization': f"Bearer {t['access_token']}"}) as u:
-                    if u.status == 200:
-                        ud = await u.json()
-                        async with aiosqlite.connect(db.DB_PATH) as db_conn:
-                            await db_conn.execute("INSERT OR REPLACE INTO accounts (user_id, token, refresh_token, expires_at) VALUES (?, ?, ?, ?)", 
-                                                  (int(ud['id']), t['access_token'], t['refresh_token'], int(time.time()) + t['expires_in']))
-                            await db_conn.commit()
-                        return web.Response(text="<h1>Authentication successful. You can close this window.</h1>", content_type='text/html')
-        return web.Response(text="Err", status=500)
+        if not code: return web.Response(text="<h1>Error: No code provided</h1>", content_type='text/html')
+        
+        data = {
+            'client_id': os.getenv('CLIENT_ID'), 
+            'client_secret': os.getenv('CLIENT_SECRET'), 
+            'grant_type': 'authorization_code', 
+            'code': code, 
+            'redirect_uri': os.getenv('REDIRECT_URI')
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post("https://discord.com/api/v10/oauth2/token", data=data) as resp:
+                    resp_data = await resp.json()
+                    if resp.status != 200: 
+                        return web.Response(text=f"<h1>Discord Error</h1><p>{resp_data}</p>", content_type='text/html')
+                    
+                    async with session.get("https://discord.com/api/v10/users/@me", headers={'Authorization': f"Bearer {resp_data['access_token']}"}) as u:
+                        if u.status == 200:
+                            ud = await u.json()
+                            async with aiosqlite.connect(db.DB_PATH) as db_conn:
+                                await db_conn.execute(
+                                    "INSERT OR REPLACE INTO accounts (user_id, token, refresh_token, expires_at) VALUES (?, ?, ?, ?)", 
+                                    (int(ud['id']), resp_data['access_token'], resp_data['refresh_token'], int(time.time()) + resp_data['expires_in'])
+                                )
+                                await db_conn.commit()
+                            return web.Response(text="<h1>Authentication successful</h1><p>You can close this window now.</p>", content_type='text/html')
+        except Exception as e:
+            return web.Response(text=f"<h1>System Error</h1><p>{e}</p>", content_type='text/html')
+            
+        return web.Response(text="<h1>Unknown Error</h1>", content_type='text/html')
 
 class BuyBoostModal(discord.ui.Modal, title="ซื้อรหัสบูส"):
     amount = discord.ui.TextInput(label="จำนวนบัญชี (1 บัญชี = 5 บาท)", required=True)
@@ -57,7 +76,6 @@ class BoostServerModal(discord.ui.Modal, title="บูสเซิร์ฟเ�
         try: gid = int(self.guild_id.value)
         except: return await interaction.response.send_message("ID ไม่ถูกต้อง", ephemeral=True)
         
-        # แก้บั๊ก ID ผิด: ใช้ fetch_guild ยิงตรงไปที่ API
         try: 
             await interaction.client.fetch_guild(gid)
         except Exception: 
@@ -84,7 +102,6 @@ class BoostServerModal(discord.ui.Modal, title="บูสเซิร์ฟเ�
                     await db_conn.execute("UPDATE accounts SET claimed = 1 WHERE user_id = ?", (uid,))
                     await db_conn.commit()
         
-        # อัปเดตสถานะการบูส
         boosts = joined * 2
         async with aiosqlite.connect(db.DB_PATH) as db_conn:
             await db_conn.execute("UPDATE stats SET sold_boosts = sold_boosts + ? WHERE id = 1", (boosts,))
@@ -115,14 +132,16 @@ class NitroMainView(discord.ui.View):
             f"<:1000035866:1559279147648290947> โปรดปิดanti botก่อนนะครับ บัญชีจะได้ไม่โดนเตะหรือเเบน จะไม่รับผิดชอบ"
         )
         embed.set_image(url="https://cdn.discordapp.com/attachments/1555167748865392701/1560874474478374943/7a7f7c254b3951e2d6aa379d5abbee53.jpg")
-        # ส่งแบบเห็นทุกคน (ephemeral=False)
+        # ให้เห็นทุกคน (ephemeral=False)
         await i.response.send_message(embed=embed, view=SystemPanelView(), ephemeral=False)
         
     @discord.ui.button(label="รับลิ้ง", style=discord.ButtonStyle.primary, custom_id="p2")
     async def p2(self, i: discord.Interaction, b: discord.ui.Button):
-        url = f"https://discord.com/oauth2/authorize?client_id={os.getenv('CLIENT_ID')}&response_type=code&redirect_uri={os.getenv('REDIRECT_URI')}&scope=identify%20identify.premium%20guilds.join"
+        redirect = quote(os.getenv('REDIRECT_URI'))
+        url = f"https://discord.com/oauth2/authorize?client_id={os.getenv('CLIENT_ID')}&response_type=code&redirect_uri={redirect}&scope=identify%20identify.premium%20guilds.join"
         embed = discord.Embed(title="เพิ่มบัญชี Nitro", description=f"[คลิกที่นี่เพื่อเข้าสู่ระบบและให้สิทธิ์บอท]({url})\n\nระบบจะรักษาสิทธิ์และต่ออายุ Token ให้ตลอด", color=0x2b2d31)
-        await i.response.send_message(embed=embed, ephemeral=True)
+        # ให้เห็นทุกคน (ephemeral=False)
+        await i.response.send_message(embed=embed, ephemeral=False)
         
     @discord.ui.button(label="เช็คบัญชี", style=discord.ButtonStyle.secondary, custom_id="p3")
     async def p3(self, i: discord.Interaction, b: discord.ui.Button):
